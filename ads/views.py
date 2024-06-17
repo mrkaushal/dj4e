@@ -1,93 +1,88 @@
-from django.views import View
-from django.shortcuts import render, redirect, get_object_or_404
-from django.urls import reverse_lazy, reverse
-from django.http import HttpResponse
-from django.contrib.auth.mixins import LoginRequiredMixin
-from django.views.generic import CreateView, UpdateView, DeleteView, ListView, DetailView
-from django.contrib.humanize.templatetags.humanize import naturaltime
-
-
-from django.core.files.uploadedfile import InMemoryUploadedFile
-
-from ads.forms import CreateForm, CommentForm
 from ads.models import Ad, Comment, Fav
-from ads.owner import OwnerListView, OwnerDetailView, OwnerCreateView, OwnerUpdateView, OwnerDeleteView
-
+from ads.owner import OwnerListView, OwnerDetailView, OwnerDeleteView
+from ads.forms import CreateForm, CommentForm
+from django.views import View
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.urls import reverse_lazy
 from django.db.models import Q
+from django.shortcuts import render, redirect, get_object_or_404
+from django.http.response import HttpResponse
 
 
-class AdListView(OwnerListView):
+class IndexView(OwnerListView):
     model = Ad
-    template_name = "ads/ad_list.html"
+    template_name = 'ads/ad_list.html'
 
     def get(self, request):
-        strval = request.GET.get("search", False)
-        if strval :
-            # Simple title-only search
-            # objects = Post.objects.filter(title__contains=strval).select_related().order_by('-updated_at')[:10]
-
-            # Multi-field search
-            query = Q(title__contains=strval)
-            query.add(Q(text__contains=strval), Q.OR)
-            objects = Ad.objects.filter(query).select_related().order_by('-updated_at')[:10]
-        else :
-            # try both versions with > 4 posts and watch the queries that happen
-            objects = Ad.objects.all().order_by('-updated_at')[:10]
-            # objects = Post.objects.select_related().all().order_by('-updated_at')[:10]
-
-        # Augment the post_list
-        for obj in objects:
-            obj.natural_updated = naturaltime(obj.updated_at)
-
-
-        ad_list = objects
         favorites = list()
-        if request.user.is_authenticated:
-            rows = request.user.favorite_ads.values('id')
-            favorites = [ row['id'] for row in rows ]
-        ctx = {'ad_list' : ad_list, 'favorites': favorites}
+
+        if (request.user.is_authenticated):
+            rows = request.user.favorite_ads.values('id')  # [{'id': 2}, {'id': 7}, ...]
+            favorites = [row['id'] for row in rows]  # [2, 7, ...]
+
+        # Milestone 4
+        ad_search = request.GET.get("search", False)
+
+        if (ad_search):
+            query = Q(title__icontains=ad_search)
+            query.add(Q(text__icontains=ad_search), Q.OR)
+            query.add(Q(tags__name__in=[ad_search]), Q.OR)
+            ad_list = Ad.objects.filter(query).select_related().distinct().order_by('-updated_at')[:10]
+        else:
+            ad_list = Ad.objects.all().order_by('-updated_at')
+
+        ctx = {'ad_list': ad_list, 'search': ad_search ,'favorites': favorites}
+
         return render(request, self.template_name, ctx)
 
 
 class AdDetailView(OwnerDetailView):
     model = Ad
-    template_name = "ads/ad_detail.html"
+    template_name = 'ads/ad_detail.html'
 
-    def get(self, request, pk) :
-        x = Ad.objects.get(id=pk)
-        comments = Comment.objects.filter(ad=x).order_by('-updated_at')
+    def get(self, request, pk):
+        comment_ad = Ad.objects.get(id=pk)
+        comments = Comment.objects.filter(ad=comment_ad).order_by('-updated_at')
         comment_form = CommentForm()
-        context = { 'ad' : x, 'comments': comments, 'comment_form': comment_form }
-        return render(request, self.template_name, context)
+        ctx = {'ad': comment_ad, 'comments': comments, 'comment_form': comment_form}
 
-class AdCreateView(LoginRequiredMixin, CreateView):
+        return render(request, self.template_name, ctx)
+
+
+class AdCreateView(LoginRequiredMixin, View):
     template_name = 'ads/ad_form.html'
-    success_url = reverse_lazy('ads:all')
+    success_url = reverse_lazy('ads:ad_list')
 
     def get(self, request, pk=None):
         form = CreateForm()
         ctx = {'form': form}
+
         return render(request, self.template_name, ctx)
 
     def post(self, request, pk=None):
         form = CreateForm(request.POST, request.FILES or None)
+
         if not form.is_valid():
             ctx = {'form': form}
             return render(request, self.template_name, ctx)
-        # Add owner to the model before saving
+
         ad = form.save(commit=False)
         ad.owner = self.request.user
         ad.save()
+        form.save_m2m()
+
         return redirect(self.success_url)
 
-class AdUpdateView(LoginRequiredMixin, UpdateView):
+
+class AdUpdateView(LoginRequiredMixin, View):
     template_name = 'ads/ad_form.html'
-    success_url = reverse_lazy('ads:all')
+    success_url = reverse_lazy('ads:ad_list')
 
     def get(self, request, pk):
         ad = get_object_or_404(Ad, id=pk, owner=self.request.user)
         form = CreateForm(instance=ad)
         ctx = {'form': form}
+
         return render(request, self.template_name, ctx)
 
     def post(self, request, pk=None):
@@ -100,6 +95,7 @@ class AdUpdateView(LoginRequiredMixin, UpdateView):
 
         ad = form.save(commit=False)
         ad.save()
+        form.save_m2m()
 
         return redirect(self.success_url)
 
@@ -108,58 +104,59 @@ class AdDeleteView(OwnerDeleteView):
     model = Ad
 
 
+# Milestone 2
+
 def stream_file(request, pk):
     ad = get_object_or_404(Ad, id=pk)
     response = HttpResponse()
     response['Content-Type'] = ad.content_type
     response['Content-Length'] = len(ad.picture)
     response.write(ad.picture)
+
     return response
 
 
 class CommentCreateView(LoginRequiredMixin, View):
-    def post(self, request, pk) :
-        f = get_object_or_404(Ad, id=pk)
-        comment = Comment(text=request.POST['comment'], owner=request.user, ad=f)
+    def post(self, request, pk):
+        success_url = reverse_lazy('ads:ad_detail', args=[pk])
+        ad = get_object_or_404(Ad, id=pk)
+        comment = Comment(text=request.POST['comment'], owner=request.user, ad=ad)
         comment.save()
-        return redirect(reverse('ads:ad_detail', args=[pk]))
+
+        return redirect(success_url)
+
 
 class CommentDeleteView(OwnerDeleteView):
     model = Comment
-    template_name = "ads/comment_delete.html"
-
-    # https://stackoverflow.com/questions/26290415/deleteview-with-a-dynamic-success-url-dependent-on-id
-    def get_success_url(self):
-        ad = self.object.ad
-        return reverse('ads:ad_detail', args=[ad.id])
+    template_name = 'ads/comment_confirm_delete.html'
 
 
-# csrf exemption in class based views
-# https://stackoverflow.com/questions/16458166/how-to-disable-djangos-csrf-validation
+# Milestone 3
+
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.db.utils import IntegrityError
 
 @method_decorator(csrf_exempt, name='dispatch')
 class AddFavoriteView(LoginRequiredMixin, View):
-    def post(self, request, pk) :
-        print("Add PK",pk)
-        ad = get_object_or_404(Ad, id=pk)
-        fav = Fav(user=request.user, ad=ad)
+    def post(self, request, pk):
+        fav_ad = get_object_or_404(Ad, id=pk)
+        fav = Fav(user=request.user, ad=fav_ad)
         try:
-            fav.save()  # In case of duplicate key
-        except IntegrityError as e:
+            fav.save()
+        except IntegrityError:
             pass
+
         return HttpResponse()
 
 @method_decorator(csrf_exempt, name='dispatch')
 class DeleteFavoriteView(LoginRequiredMixin, View):
-    def post(self, request, pk) :
-        print("Delete PK",pk)
-        ad = get_object_or_404(Ad, id=pk)
+    def post(self, request, pk):
+        del_ad = get_object_or_404(Ad, id=pk)
         try:
-            fav = Fav.objects.get(user=request.user, ad=ad).delete()
-        except Fav.DoesNotExist as e:
+            fav = Fav.objects.get(user=request.user, ad=del_ad)
+            fav.delete()
+        except Fav.DoesNotExist:
             pass
 
         return HttpResponse()

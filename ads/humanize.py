@@ -1,5 +1,5 @@
+# Really simple naturalsize that is missing from django humanize
 
-# Really simple naturalsize that is missing from django humanize :(
 def naturalsize(count):
     fcount = float(count)
     k = 1024
@@ -11,4 +11,5 @@ def naturalsize(count):
         return str(int(fcount / (k/10.0)) / 10.0) + 'KB'
     if fcount >= m and fcount < g:
         return str(int(fcount / (m/10.0)) / 10.0) + 'MB'
+
     return str(int(fcount / (g/10.0)) / 10.0) + 'GB'
